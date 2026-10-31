@@ -124,6 +124,16 @@ jobs:
           PY
 
           pnpm build:obj
+
+          # 关键：最终链接必须用 em++（embind 是 C++ 代码，用 emcc 链接会缺
+          # __cxa_allocate_exception / std::length_error 等 C++ 运行时符号）。
+          # build-wasm.mjs 用 which('emcc') 查找编译器，所以放一个转发垫片最稳。
+          mkdir -p "$WS/shim"
+          printf '#!/bin/bash\nexec em++ "$@"\n' > "$WS/shim/emcc"
+          chmod +x "$WS/shim/emcc"
+          export PATH="$WS/shim:$PATH"
+          echo "==> emcc 解析为: $(which emcc)（应为 shim）"
+
           pnpm build:wasm
           pnpm copy
 
