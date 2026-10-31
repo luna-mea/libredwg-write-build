@@ -106,6 +106,23 @@ jobs:
           echo "==> build:prepare 配置（确认已无 --disable-write）："
           grep -n 'disable-write' package.json || echo "OK: --disable-write 已移除"
           pnpm build:prepare
+
+          # 跳过 examples / programs（emscripten 下示例程序编译不过，且我们只需要库）
+          python3 - <<'PY'
+          p = '../../build-wasm/Makefile'
+          s = open(p).read()
+          out = []
+          for l in s.split('\n'):
+              if l.startswith('SUBDIRS'):
+                  parts = l.split()
+                  out.append(' '.join([parts[0]] + [w for w in parts[1:] if w not in ('examples', 'programs')]))
+              else:
+                  out.append(l)
+          s2 = '\n'.join(out)
+          open(p, 'w').write(s2)
+          print('patched SUBDIRS:', [l for l in s2.splitlines() if l.startswith('SUBDIRS')])
+          PY
+
           pnpm build:obj
           pnpm build:wasm
           pnpm copy
