@@ -1,0 +1,144 @@
+# ============================================================================
+# 云端一键编译“能写 DWG”的 LibreDWG wasm（实现 DWG 进 / DWG 出）
+# ----------------------------------------------------------------------------
+# 为什么需要它：
+#   浏览器可用的 LibreDWG 预编译包（@mlightcad/libredwg-web）把 dwg_write_file
+#   在 embind 绑定层【注释掉】了（bindings/javascript/embind/binding_func.cpp 中
+#   DEFINE_FUNC(dwg_write_file) 被注释），所以现成 wasm 只能读 DWG、不能写 DWG。
+#   本工作流在 GitHub 的 Linux 机器上：
+#     1) 克隆 libredwg-web 源码；
+#     2) 用补丁取消注释 dwg_write_file 绑定，并让 wrapper 返回 int 错误码；
+#     3) 移除 configure 的 --disable-write，使 C 库编译写 DWG 支持（USE_WRITE）；
+#     4) 安装 Emscripten 并编译出带 dwg_write_file 的 wasm；
+#     5) 把 libredwg-web.wasm / libredwg-web.js 提交回本仓库，供 app.js 下载使用。
+#
+# 用法：
+#   把本文件放到仓库的 .github/workflows/ 后，push 或手动 Run workflow 即触发。
+#   完成后仓库根目录会出现 libredwg-web.wasm / libredwg-web.js。
+# 产物：libredwg-web.wasm + libredwg-web.js（写入引擎，供 app.js 按需加载）
+# 许可：LibreDWG / libredwg-web 为 GPL-3.0；仅个人本地使用、不对外分发即可。
+# ============================================================================
+name: Build LibreDWG write-enabled wasm
+
+on:
+  workflow_dispatch:   # 允许在 Actions 页面手动触发
+  push:
+    paths:
+      - '.github/workflows/build-libredwg-wasm.yml'
+
+permissions:
+  contents: write    # 需要把编译好的 wasm 提交回本仓库
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 本仓库
+        uses: actions/checkout@v4
+
+      - name: 准备 Node.js 20（libredwg 构建要求 Node >= 20）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 安装 pnpm
+        run: npm install -g pnpm
+
+      - name: 安装系统编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 make gcc g++ \
+            automake autoconf libtool pkg-config \
+            libxml2-dev zlib1g-dev libpcre2-dev
+
+      - name: 克隆 libredwg-web 并启用“写 DWG”绑定 + 编译 wasm
+        env:
+          WS: ${{ github.workspace }}
+        run: |
+          set -e
+          cd "$WS"
+
+          # 1) 克隆 libredwg-web 并 autogen
+          git clone --depth 1 https://github.com/mlightcad/libredwg-web.git
+          cd "$WS/libredwg-web"
+          ./autogen.sh
+          cd "$WS/libredwg-web/bindings/javascript"
+
+          # 2) 关键补丁：libredwg-web 默认把 dwg_write_file 注释掉了，这里取消注释，
+          #    并让 wrapper 返回 int 错误码（与 app.js 的调用约定一致）。
+          python3 - <<'PY'
+          import re
+          p = 'embind/binding_func.cpp'
+          s = open(p).read()
+          # 删除被注释掉的 dwg_write_file_wrapper 块
+          s = re.sub(r'//\s*emscripten::val dwg_write_file_wrapper\(.*?//\s*\}\n',
+                     '', s, flags=re.S, count=1)
+          # 插入返回 int 错误码的可用 wrapper（放在 dwg_get_version_type_wrapper 之前）
+          wrapper = (
+              'int dwg_write_file_wrapper(\n'
+              '  const std::string& filename,\n'
+              '  uintptr_t dwg_ptr) {\n'
+              '  Dwg_Data* dwg = reinterpret_cast<Dwg_Data*>(dwg_ptr);\n'
+              '  int error = dwg_write_file(filename.c_str(), dwg);\n'
+              '  return error;\n'
+              '}\n\n'
+          )
+          s = s.replace('int dwg_get_version_type_wrapper(uintptr_t dwg_ptr) {',
+                        wrapper + 'int dwg_get_version_type_wrapper(uintptr_t dwg_ptr) {', 1)
+          # 取消注释 DEFINE_FUNC(dwg_write_file)
+          s = s.replace('// DEFINE_FUNC(dwg_write_file);', 'DEFINE_FUNC(dwg_write_file);')
+          open(p, 'w').write(s)
+          print('patched binding_func.cpp: dwg_write_file enabled')
+          PY
+
+          # 3) 安装 Emscripten（手动安装，避免第三方 action 版本标签风险）
+          cd "$WS"
+          git clone https://github.com/emscripten-core/emsdk.git
+          cd "$WS/emsdk"
+          ./emsdk install latest
+          ./emsdk activate latest
+          source "./emsdk_env.sh"
+
+          # 4) 编译“写 DWG 版”wasm（关键：移除 --disable-write）
+          cd "$WS/libredwg-web/bindings/javascript"
+          pnpm install
+          sed -i 's/ --disable-write//' package.json
+          echo "==> build:prepare 配置（确认已无 --disable-write）："
+          grep -n 'disable-write' package.json || echo "OK: --disable-write 已移除"
+          pnpm build:prepare
+          pnpm build:obj
+          pnpm build:wasm
+          pnpm copy
+
+          # 5) 取出写引擎产物到仓库根目录
+          cp wasm/libredwg-web.wasm "$WS/libredwg-web.wasm"
+          cp wasm/libredwg-web.js    "$WS/libredwg-web.js"
+
+          # 6) 自检
+          echo "==> 自检：wasm 是否导出 dwg_write_file"
+          if grep -aq "dwg_write_file" "$WS/libredwg-web.wasm"; then
+            echo "OK: dwg_write_file 已在 wasm 中"
+          else
+            echo "WARN: 未在 wasm 中找到 dwg_write_file 字符串，构建可能未生效"
+          fi
+          ls -lh "$WS/libredwg-web.wasm" "$WS/libredwg-web.js"
+
+      - name: 将写引擎提交回本仓库（供 app.js 直接下载）
+        env:
+          WS: ${{ github.workspace }}
+        run: |
+          cd "$WS"
+          git config user.email "cad-build@users.noreply.github.com"
+          git config user.name "CAD Build Bot"
+          git add libredwg-web.wasm libredwg-web.js
+          git commit -m "build: libredwg write-enabled wasm [skip ci]" || echo "nothing to commit"
+          git push origin HEAD:refs/heads/main
+
+      - name: 上传 Artifact（备用）
+        uses: actions/upload-artifact@v4
+        with:
+          name: libredwg-write
+          path: |
+            libredwg-web.wasm
+            libredwg-web.js
+          if-no-files-found: error
