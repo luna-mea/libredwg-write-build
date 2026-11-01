@@ -135,9 +135,10 @@ jobs:
           echo "==> emcc 解析为: $(which emcc)（应为 shim）"
 
           # MV3 扩展 CSP 只允许 wasm-unsafe-eval，禁止 JS eval / new Function。
-          # embind 默认用 new Function 动态构造 invoker，必须加此开关改用回退实现。
-          sed -i "s|'-lembind',|'-lembind',\n  '-sDISABLE_DYNAMIC_EXECUTION=1',|" script/build-wasm.mjs
-          grep -n "DISABLE_DYNAMIC_EXECUTION" script/build-wasm.mjs || echo "WARN: build-wasm.mjs 补丁未打上"
+          # embind 默认用 new Function 动态构造 invoker，必须改用回退实现。
+          # 注意：Emscripten 4.x 中旧名 DISABLE_DYNAMIC_EXECUTION 已改为 DYNAMIC_EXECUTION=0
+          sed -i "s|'-lembind',|'-lembind',\n  '-sDYNAMIC_EXECUTION=0',|" script/build-wasm.mjs
+          grep -n "DYNAMIC_EXECUTION" script/build-wasm.mjs || echo "WARN: build-wasm.mjs 补丁未打上"
 
           pnpm build:wasm
           pnpm copy
