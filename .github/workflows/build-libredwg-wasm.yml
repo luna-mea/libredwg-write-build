@@ -134,6 +134,11 @@ jobs:
           export PATH="$WS/shim:$PATH"
           echo "==> emcc 解析为: $(which emcc)（应为 shim）"
 
+          # MV3 扩展 CSP 只允许 wasm-unsafe-eval，禁止 JS eval / new Function。
+          # embind 默认用 new Function 动态构造 invoker，必须加此开关改用回退实现。
+          sed -i "s|'-lembind',|'-lembind',\n  '-sDISABLE_DYNAMIC_EXECUTION=1',|" script/build-wasm.mjs
+          grep -n "DISABLE_DYNAMIC_EXECUTION" script/build-wasm.mjs || echo "WARN: build-wasm.mjs 补丁未打上"
+
           pnpm build:wasm
           pnpm copy
 
@@ -148,6 +153,12 @@ jobs:
           else
             echo "WARN: 未在 wasm 中找到 dwg_write_file 字符串，构建可能未生效"
           fi
+          # MV3 CSP 自检：产物 JS 里绝不能残留 new Function / eval
+          if grep -q "new Function" wasm/libredwg-web.js; then
+            echo "FATAL: 生成的 JS 仍含 new Function，MV3 扩展 CSP 会拦截（-sDISABLE_DYNAMIC_EXECUTION 未生效？）"
+            exit 1
+          fi
+          echo "OK: 产物 JS 无 new Function / eval，可通过 MV3 CSP"
           ls -lh "$WS/libredwg-web.wasm" "$WS/libredwg-web.js"
 
       - name: 将写引擎提交回本仓库（供 app.js 直接下载）
